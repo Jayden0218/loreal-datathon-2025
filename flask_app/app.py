@@ -43,6 +43,31 @@ from flask import Flask, request, jsonify, send_file
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend before importing pyplot
 
+# --- Load .env.local if present (no extra dependency) ---
+def _load_env_file(path: str = ".env.local") -> bool:
+    try:
+        if not os.path.exists(path):
+            return False
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.lower().startswith("export "):
+                    line = line[7:].strip()
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+        return True
+    except Exception:
+        return False
+
+_ = _load_env_file()
+
 
 app = Flask(__name__)
 # Explicit CORS config to satisfy extension preflights (images + POST)

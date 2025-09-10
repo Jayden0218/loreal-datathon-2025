@@ -2,16 +2,18 @@
 
 document.addEventListener("DOMContentLoaded", async () => {
   const outputDiv = document.getElementById("output");
-  const API_KEY = 'AIzaSyBQNd9c801KEupiKqZdV5AZJ8gHPoPkVaY';
+  // API key is now loaded from chrome.storage (user-provided in Settings)
+  let API_KEY = '';
 
   // Config handling (storage-backed)
   const apiHostInput = document.getElementById('apiHost');
   const apiPortInput = document.getElementById('apiPort');
+  const ytApiKeyInput = document.getElementById('ytApiKey');
   const saveBtn = document.getElementById('saveCfg');
 
   async function loadConfig() {
     return new Promise((resolve) => {
-      chrome.storage.sync.get({ apiHost: 'http://localhost', apiPort: '5001' }, (cfg) => {
+      chrome.storage.sync.get({ apiHost: 'http://localhost', apiPort: '5001', ytApiKey: '' }, (cfg) => {
         resolve(cfg);
       });
     });
@@ -34,12 +36,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   const cfg = await loadConfig();
   apiHostInput.value = cfg.apiHost;
   apiPortInput.value = cfg.apiPort;
+  ytApiKeyInput.value = cfg.ytApiKey || '';
   let API_BASE = makeBaseURL(cfg.apiHost, cfg.apiPort);
+  API_KEY = cfg.ytApiKey || '';
 
   saveBtn.addEventListener('click', async () => {
-    const newCfg = { apiHost: apiHostInput.value.trim(), apiPort: apiPortInput.value.trim() };
+    const newCfg = { 
+      apiHost: apiHostInput.value.trim(), 
+      apiPort: apiPortInput.value.trim(),
+      ytApiKey: ytApiKeyInput.value.trim()
+    };
     await saveConfig(newCfg);
     API_BASE = makeBaseURL(newCfg.apiHost, newCfg.apiPort);
+    API_KEY = newCfg.ytApiKey || '';
     outputDiv.innerHTML = `<p style="color:#9fe29f;">Settings saved. Using API: ${API_BASE}</p>` + outputDiv.innerHTML;
   });
 
@@ -60,6 +69,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     const match = url.match(youtubeRegex);
 
     if (match && match[1]) {
+      if (!API_KEY) {
+        outputDiv.innerHTML = `<p style="color:#ffcc66;">Set your YouTube API key in Settings to fetch comments and video details.</p>`;
+        return;
+      }
       const videoId = match[1];
       outputDiv.innerHTML = `<div class="section-title">YouTube Video ID</div><p>${videoId}</p><p>Fetching comments...</p>`;
 
