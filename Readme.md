@@ -92,15 +92,6 @@ Notes:
 - The Chrome extension stores your YouTube API key in Chrome storage; the backend does not need it.
 - CPU is used by default. GPU is disabled via `CUDA_VISIBLE_DEVICES=""` for stability.
 
-## Screenshots
-
-Add your screenshots to a `docs/` folder and reference them here, e.g.:
-
-```markdown
-![Dashboard – Emotions](docs/dashboard_emotions.png)
-![Extension – Video Summary](docs/extension_summary.png)
-```
-
 ## Troubleshooting
 
 - Slow first run: model weights download on first use; subsequent runs are fast.
@@ -115,6 +106,3 @@ Add your screenshots to a `docs/` folder and reference them here, e.g.:
 - `yt-chrome-plugin-frontend/` — Chrome extension (popup UI + fetch + calls API).
 - `src/` — Supporting data/ingestion utilities.
 
-## License
-
-Internal/Personal project. Add a license if you plan to distribute.
