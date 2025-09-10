@@ -379,7 +379,7 @@ def emotion_labels_chart():
             img = _pie(labels, sizes)
             return send_file(img, mimetype='image/png')
         with _emo_lock:
-            preds = emo(comments)
+            preds = emo(comments, truncation=True, max_length=512, padding=True)
         top = []
         for sc in preds:
             if not sc:
@@ -495,7 +495,7 @@ def goemotions_with_timestamps():
         if emo is None:
             return jsonify({"error": "GoEmotions model unavailable"}), 503
         with _emo_lock:
-            preds = emo(comments)
+            preds = emo(comments, truncation=True, max_length=512, padding=True)
         out = []
         for txt, ts, sc in zip(comments, timestamps, preds):
             if sc:

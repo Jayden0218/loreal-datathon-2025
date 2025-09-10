@@ -502,7 +502,7 @@ def infer_emotions_batch(texts: List[str], threshold: float = 0.3) -> List[Dict[
         return [{} for _ in texts]
 
     out = []
-    preds = clf(texts)
+    preds = clf(texts, truncation=True, max_length=512, padding=True)
     for scores in preds:
         if not scores:
             out.append({})
@@ -1094,7 +1094,7 @@ else:
             # Use translated comments if present
             ccol = "commentText_translated" if "commentText_translated" in df.columns else "commentText"
             texts = df[ccol].fillna("").astype(str).tolist()
-            preds = emo_pipe(texts)
+            preds = emo_pipe(texts, truncation=True, max_length=512, padding=True)
 
             # GoEmotions mapping based on provided image
             POS = {
