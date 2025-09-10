@@ -1,0 +1,45 @@
+############################################################
+# App requirements (UTF-8; pin stable versions for Py3.11)
+############################################################
+
+# Web API
+Flask==3.0.3
+flask-cors==4.0.1
+
+# Core scientific
+numpy==1.26.4
+pandas==2.2.2
+matplotlib==3.8.4
+Pillow==10.4.0
+wordcloud==1.9.3
+nltk==3.9.1
+scikit-learn==1.5.2
+
+# NLP models (CPU)
+torch==2.2.2
+transformers==4.43.3
+sentence-transformers==2.7.0
+huggingface-hub==0.24.6
+safetensors==0.4.3
+tqdm==4.67.1
+
+# Streamlit app + charts
+streamlit==1.49.0
+plotly==5.22.0
+
+############################################################
+# Optional (uncomment if you need these features)
+############################################################
+# spaCy pipeline support for better keyword extraction (needs model download)
+# spacy==3.7.4
+
+# Translation pipeline models (many require sentencepiece/sacremoses)
+# sentencepiece==0.2.0
+# sacremoses==0.1.1
+
+# MLflow experiment logging (file-based tracking supported)
+# mlflow==2.14.1
+
+# AWS Bedrock / Boto3 for optional provider-based translation
+# boto3==1.34.162
+

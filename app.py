@@ -1,3 +1,17 @@
+"""
+Streamlit app for exploring YouTube comments and video metadata.
+
+Highlights
+- Loads a preprocessed dataset and offers interactive charts and tables.
+- Computes topic/video/comment relevance via either MiniLM embeddings or
+  a pure scikit-learn LSA fallback (TF‑IDF + TruncatedSVD + cosine).
+- Optional models (Transformers, Sentence-Transformers, AWS Bedrock) are
+  loaded lazily and guarded with helpful UI messages if unavailable.
+
+This file focuses on UI + analysis logic, while the Chrome extension uses
+the Flask API in `flask_app/app.py` to generate server-side charts/images.
+"""
+
 from sklearn.preprocessing import normalize
 from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -13,17 +27,13 @@ import pandas as pd
 import streamlit as st
 import warnings
 
-# Suppress specific PyTorch/Transformers deprecation noise shown in logs
-warnings.filterwarnings(
-    "ignore",
-    category=UserWarning,
-    message=r".*torch\.utils\._pytree\._register_pytree_node is deprecated.*",
-)
-
-# Stable DataFrame hashing for Streamlit cache (handles list-valued columns)
-
 
 def _hash_df_for_cache(x: pd.DataFrame) -> str:
+    """Stable-ish hash for caching DataFrames in Streamlit.
+
+    Uses JSON (table) orientation where possible to capture structure/content
+    without being too large, and falls back to a minimal signature.
+    """
     try:
         # JSON includes lists naturally; order is preserved; dates ISO-formatted
         return x.to_json(orient="table", date_format="iso")
@@ -44,6 +54,7 @@ except Exception as _e_px:
 
 
 def pie_chart_df(df, names, values, title):
+    """Create a Plotly pie chart (Express if available, else graph_objects)."""
     if _HAS_PX:
         return px.pie(df, names=names, values=values, title=title)
     fig = go.Figure(data=[go.Pie(labels=df[names], values=df[values])])
@@ -52,6 +63,7 @@ def pie_chart_df(df, names, values, title):
 
 
 def line_chart_df(df, x, y, color, title):
+    """Create a Plotly line chart with markers; fallback when Express missing."""
     if _HAS_PX:
         return px.line(df, x=x, y=y, color=color, markers=True, title=title)
     fig = go.Figure()
@@ -133,7 +145,10 @@ def _norm_text(s: str) -> str:
 @st.cache_resource(show_spinner=False)
 def get_semantic_model(model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
                        force_cpu: bool = True):
-    """Return a SentenceTransformer or None (falls back to LSA)."""
+    """Return a SentenceTransformer (CPU by default) or None.
+
+    On failure, callers should use `build_relevance_table_lsa` as a fallback.
+    """
     if not _SBERT_IMPORT_OK:
         st.info("`sentence_transformers` not installed — using LSA fallback.")
         return None
@@ -229,6 +244,7 @@ def counts_from_list_column(series: pd.Series) -> pd.DataFrame:
 
 # -------------------------- Data Loading --------------------------
 def load_local_csv(path: str) -> pd.DataFrame:
+    """Load a small sample of the dataset and normalize common columns."""
     # Only load a small sample to keep the app snappy
     df = pd.read_csv(path, nrows=40)
 
@@ -530,27 +546,7 @@ with st.expander("Preview", expanded=True):
         )
     except Exception:
         pass
-    # Untranslated vs Translated (Helsinki) preview
-    if "commentText" in df.columns:
-        prev = df.head(50)
-        originals = prev["commentText"].fillna("").astype(str).tolist()
-        # Use existing translated column if present; otherwise translate now
-        if "commentText_translated" in df.columns:
-            translations = prev["commentText_translated"].fillna(
-                "").astype(str).tolist()
-        else:
-            try:
-                translations = translate_texts_cached(originals)
-            except Exception:
-                translations = originals
-        view_prev = pd.DataFrame({
-            "Untranslated": originals,
-            "Translated (Helsinki)": translations,
-        })
-        st.caption("Untranslated vs Translated (Helsinki-NLP)")
-        st.dataframe(view_prev, use_container_width=True)
-    else:
-        st.info("Column 'commentText' not found — cannot show translation preview.")
+   
 
 # -------------------------- Optional Translation (to English) --------------------------
 
@@ -885,154 +881,6 @@ else:
         except Exception:
             pass
 
-
-def _translate_hf(texts: list) -> list:
-    tr = get_translator()
-    if tr is None:
-        return texts
-    out = ["" for _ in texts]
-    batch, idxs = [], []
-
-    def flush():
-        if not batch:
-            return
-        res = tr(batch, max_length=512)
-        for k, r in enumerate(res):
-            out[idxs[k]] = r.get("translation_text", batch[k])
-        batch.clear()
-        idxs.clear()
-    for i, t in enumerate(texts):
-        s = (t or "").strip()
-        if not s:
-            out[i] = ""
-            continue
-        if _is_likely_english(s):
-            out[i] = s
-            continue
-        batch.append(s)
-        idxs.append(i)
-        if len(batch) >= 16:
-            flush()
-    flush()
-    return out
-
-
-def _translate_google(texts: list) -> list:
-    # Removed (Google translator deprecated in this app)
-    return texts
-
-
-def _translate_openai(texts: list, model: str = "gpt-4o-mini") -> list:
-    # Removed (OpenAI translator deprecated in this app)
-    return texts
-
-
-def _translate_bedrock(texts: list,
-                       model_id: str | None = None,
-                       region: str | None = None) -> list:
-    if not _BEDROCK_OK:
-        return texts
-    # Pull overrides from UI (session_state) first, then env, then hard default
-    model_id = (
-        st.session_state.get("bedrock_model_id") or model_id or
-        os.environ.get("BEDROCK_MODEL_ID") or "amazon.nova-micro-v1:0"
-    )
-    region = (
-        st.session_state.get("bedrock_region") or region or
-        os.environ.get("BEDROCK_REGION") or os.environ.get(
-            "AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
-    )
-    ak = st.session_state.get(
-        "bedrock_access_key_id") or os.environ.get("AWS_ACCESS_KEY_ID")
-    sk = st.session_state.get("bedrock_secret_access_key") or os.environ.get(
-        "AWS_SECRET_ACCESS_KEY")
-    tk = st.session_state.get(
-        "bedrock_session_token") or os.environ.get("AWS_SESSION_TOKEN")
-    # Debug capture toggle via Streamlit session_state
-    debug = False
-    try:
-        debug = bool(st.session_state.get("bedrock_debug", False))
-    except Exception:
-        debug = False
-    try:
-        if ak and sk:
-            session = _boto3.session.Session(
-                aws_access_key_id=ak, aws_secret_access_key=sk,
-                aws_session_token=tk, region_name=region
-            )
-            client = session.client("bedrock-runtime")
-        else:
-            client = _boto3.client("bedrock-runtime", region_name=region)
-    except Exception:
-        return texts
-    out = ["" for _ in texts]
-    idxs = [i for i, t in enumerate(texts) if (
-        t or "").strip() and not _is_likely_english(t)]
-    sys_prompt = (
-        "You are a precise translation engine. Translate each input string to English. "
-        "If an input is already English, return it unchanged. Preserve meaning, tone, punctuation, and emojis. "
-        "Return ONLY a JSON array of strings, same order and length as input."
-    )
-    for i in range(0, len(idxs), 40):
-        batch_idx = idxs[i:i+40]
-        batch = [texts[j] for j in batch_idx]
-        user_payload = json.dumps(batch, ensure_ascii=False)
-        try:
-            resp = client.converse(
-                modelId=model_id,
-                messages=[
-                    {"role": "system", "content": [{"text": sys_prompt}]},
-                    {"role": "user", "content": [{"text": user_payload}]},
-                ],
-                inferenceConfig={"maxTokens": 2048, "temperature": 0}
-            )
-            parts = resp.get("output", {}).get(
-                "message", {}).get("content", [])
-            content = "".join([p.get("text", "") for p in parts])
-            try:
-                arr = json.loads(content)
-                if not isinstance(arr, list):
-                    raise ValueError("not list")
-            except Exception:
-                start = content.find("[")
-                end = content.rfind("]")
-                if start != -1 and end != -1 and end > start:
-                    arr = json.loads(content[start:end+1])
-                else:
-                    arr = batch
-            # Optional debug capture (store only a few batches to avoid bloat)
-            if debug:
-                try:
-                    log = st.session_state.setdefault("bedrock_debug_log", [])
-                    if len(log) < 5:
-                        log.append({
-                            "model": model_id,
-                            "region": region,
-                            "batch_size": len(batch),
-                            "request": batch,
-                            "response_raw": content,
-                            "response_parsed_preview": arr[:10],
-                        })
-                except Exception:
-                    pass
-            if len(arr) != len(batch):
-                arr = batch
-            for j, idx in enumerate(batch_idx):
-                out[idx] = str(arr[j]) if j < len(arr) else batch[j]
-        except Exception:
-            for j, idx in enumerate(batch_idx):
-                out[idx] = batch[j]
-    for i, t in enumerate(texts):
-        if out[i] == "":
-            out[i] = t or ""
-    return out
-
-
-@st.cache_data(show_spinner=False)
-def translate_texts_cached_provider(texts: list, provider: str) -> list:
-    if provider == 'bedrock' and _BEDROCK_OK:
-        return _translate_bedrock(texts)
-    return _translate_hf(texts)
 
 
 # Translation provider UI removed. Defaulting to Helsinki-NLP translation when available.

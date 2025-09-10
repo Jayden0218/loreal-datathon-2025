@@ -69,31 +69,15 @@ document.addEventListener("DOMContentLoaded", async () => {
         return;
       }
 
-      outputDiv.innerHTML += `<p>Fetched ${comments.length} comments. Performing sentiment analysis...</p>`;
-      const predictions = await getSentimentPredictions(comments);
+      outputDiv.innerHTML += `<p>Fetched ${comments.length} comments. Classifying emotions (GoEmotions)...</p>`;
+      const goemoItems = await getGoEmotionsWithTimestamps(comments);
 
-      if (predictions) {
-        // Process the predictions to get sentiment counts and sentiment data
-        const sentimentCounts = { "1": 0, "0": 0, "-1": 0 };
-        const sentimentData = []; // For trend graph
-        const totalSentimentScore = predictions.reduce((sum, item) => sum + parseInt(item.sentiment), 0);
-        predictions.forEach((item, index) => {
-          sentimentCounts[item.sentiment]++;
-          sentimentData.push({
-            timestamp: item.timestamp,
-            sentiment: parseInt(item.sentiment)
-          });
-        });
-
-        // Compute metrics
+      if (goemoItems) {
+        // Compute metrics (model-agnostic)
         const totalComments = comments.length;
         const uniqueCommenters = new Set(comments.map(comment => comment.authorId)).size;
         const totalWords = comments.reduce((sum, comment) => sum + comment.text.split(/\s+/).filter(word => word.length > 0).length, 0);
         const avgWordLength = (totalWords / totalComments).toFixed(2);
-        const avgSentimentScore = (totalSentimentScore / totalComments).toFixed(2);
-
-        // Normalize the average sentiment score to a scale of 0 to 10
-        const normalizedSentimentScore = (((parseFloat(avgSentimentScore) + 1) / 2) * 10).toFixed(2);
 
         // Add the Comment Analysis Summary section
         outputDiv.innerHTML += `
@@ -112,34 +96,25 @@ document.addEventListener("DOMContentLoaded", async () => {
                 <div class="metric-title">Avg Comment Length</div>
                 <div class="metric-value">${avgWordLength} words</div>
               </div>
-              <div class="metric">
-                <div class="metric-title">Avg Sentiment Score</div>
-                <div class="metric-value">${normalizedSentimentScore}/10</div>
-              </div>
+            
             </div>
           </div>
         `;
 
-        // Add the Sentiment Analysis Results section with a placeholder for the chart
+        // Add the Emotion Trend Graph section
         outputDiv.innerHTML += `
           <div class="section">
-            <div class="section-title">Sentiment Analysis Results</div>
-            <p>See the pie chart below for sentiment distribution.</p>
-            <div id="chart-container"></div>
-          </div>`;
-
-        // Fetch and display the pie chart inside the chart-container div
-        await fetchAndDisplayChart(sentimentCounts);
-
-        // Add the Sentiment Trend Graph section
-        outputDiv.innerHTML += `
-          <div class="section">
-            <div class="section-title">Sentiment Trend Over Time</div>
+            <div class="section-title">Emotion Trend Over Time (GoEmotions)</div>
             <div id="trend-graph-container"></div>
           </div>`;
 
-        // Fetch and display the sentiment trend graph
-        await fetchAndDisplayTrendGraph(sentimentData);
+        // Prepare items for emotion trend graph
+        const trendItems = goemoItems
+          .filter(x => x.timestamp && x.emotion)
+          .map(x => ({ timestamp: x.timestamp, emotion: x.emotion }));
+
+        // Fetch and display the emotion trend graph
+        await fetchAndDisplayEmotionTrendGraph(trendItems);
 
         // Add the Word Cloud section
         outputDiv.innerHTML += `
@@ -154,7 +129,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         // Add Quality Labels pie (MiniLM)
         outputDiv.innerHTML += `
           <div class="section">
-            <div class="section-title">Quality Labels (MiniLM)</div>
+            <div class="section-title">Quality Labels</div>
             <div id="quality-pie"></div>
           </div>`;
         await fetchAndDisplayQualityPie(comments);
@@ -162,7 +137,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         // Add Hybrid Relevance pie (Keywords + Embeddings)
         outputDiv.innerHTML += `
           <div class="section">
-            <div class="section-title">Hybrid Relevance</div>
+            <div class="section-title">Relevance</div>
             <div id="hybrid-pie"></div>
           </div>`;
         const vd = await fetchVideoDetails(videoId);
@@ -171,20 +146,20 @@ document.addEventListener("DOMContentLoaded", async () => {
         // Add GoEmotions pie
         outputDiv.innerHTML += `
           <div class="section">
-            <div class="section-title">GoEmotions (Top Label)</div>
+            <div class="section-title">GoEmotions</div>
             <div id="goemo-pie"></div>
           </div>`;
         await fetchAndDisplayGoEmoPie(comments);
 
-        // Add the top comments section
+        // Add the top comments section using GoEmotions
         outputDiv.innerHTML += `
           <div class="section">
-            <div class="section-title">Top 25 Comments with Sentiments</div>
+            <div class="section-title">Top 25 Comments with Emotions (GoEmotions)</div>
             <ul class="comment-list">
-              ${predictions.slice(0, 25).map((item, index) => `
+              ${goemoItems.slice(0, 25).map((item, index) => `
                 <li class="comment-item">
                   <span>${index + 1}. ${item.comment}</span><br>
-                  <span class="comment-sentiment">Sentiment: ${item.sentiment}</span>
+                  <span class="comment-sentiment">Emotion: ${item.emotion} ${typeof item.score === 'number' ? `(${(item.score*100).toFixed(1)}%)` : ''}</span>
                 </li>`).join('')}
             </ul>
           </div>`;
@@ -229,52 +204,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     } catch (e) { return null; }
   }
 
-  async function getSentimentPredictions(comments) {
+  async function getGoEmotionsWithTimestamps(comments) {
     try {
-      const response = await fetch(`${API_BASE}/predict_with_timestamps`, {
+      const response = await fetch(`${API_BASE}/goemotions_with_timestamps`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ comments })
       });
-      let text = await response.text();
-      let result;
-      try { result = JSON.parse(text); } catch (_) { result = null; }
-      if (response.ok && result) {
-        return result; // includes sentiment and timestamp
-      }
+      const text = await response.text();
+      let result; try { result = JSON.parse(text); } catch (_) { result = null; }
+      if (response.ok && result) return result;
       const msg = (result && result.error) ? result.error : `HTTP ${response.status}: ${text}`;
       throw new Error(msg);
-    } catch (error) {
-      console.error("Error fetching predictions:", error);
-      outputDiv.innerHTML += `<p style="color:#ff8888;">Error fetching sentiment predictions: ${error.message}</p>`;
+    } catch (e) {
+      outputDiv.innerHTML += `<p style="color:#ff8888;">GoEmotions inference error: ${e.message}</p>`;
       return null;
     }
   }
 
-  async function fetchAndDisplayChart(sentimentCounts) {
-    try {
-      const response = await fetch(`${API_BASE}/generate_chart`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sentiment_counts: sentimentCounts })
-      });
-      if (!response.ok) {
-        throw new Error('Failed to fetch chart image');
-      }
-      const blob = await response.blob();
-      const imgURL = URL.createObjectURL(blob);
-      const img = document.createElement('img');
-      img.src = imgURL;
-      img.style.width = '100%';
-      img.style.marginTop = '20px';
-      // Append the image to the chart-container div
-      const chartContainer = document.getElementById('chart-container');
-      chartContainer.appendChild(img);
-    } catch (error) {
-      console.error("Error fetching chart image:", error);
-      outputDiv.innerHTML += "<p>Error fetching chart image.</p>";
-    }
-  }
+  // Sentiment pie chart removed per request
 
   async function fetchAndDisplayWordCloud(comments) {
     try {
@@ -355,28 +303,21 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  async function fetchAndDisplayTrendGraph(sentimentData) {
+  async function fetchAndDisplayEmotionTrendGraph(items) {
     try {
-      const response = await fetch(`${API_BASE}/generate_trend_graph`, {
+      const response = await fetch(`${API_BASE}/generate_emotion_trend`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sentiment_data: sentimentData })
+        body: JSON.stringify({ items })
       });
-      if (!response.ok) {
-        throw new Error('Failed to fetch trend graph image');
-      }
+      if (!response.ok) throw new Error(await response.text());
       const blob = await response.blob();
-      const imgURL = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
       const img = document.createElement('img');
-      img.src = imgURL;
-      img.style.width = '100%';
-      img.style.marginTop = '20px';
-      // Append the image to the trend-graph-container div
-      const trendGraphContainer = document.getElementById('trend-graph-container');
-      trendGraphContainer.appendChild(img);
-    } catch (error) {
-      console.error("Error fetching trend graph image:", error);
-      outputDiv.innerHTML += "<p>Error fetching trend graph image.</p>";
+      img.src = url; img.style.width = '100%'; img.style.marginTop = '20px';
+      document.getElementById('trend-graph-container').appendChild(img);
+    } catch (e) {
+      outputDiv.innerHTML += `<p style="color:#ff8888;">Emotion trend error: ${e.message}</p>`;
     }
   }
 });

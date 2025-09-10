@@ -1,4 +1,20 @@
-import pickle
+"""
+Flask API for YouTube comment analysis (image charts + JSON endpoints).
+
+Key features:
+- Classic ML sentiment model endpoints (kept for compatibility).
+- GoEmotions-based emotion labeling and monthly trend generation.
+- Quality labeling and hybrid relevance pies (semantic + keyword).
+- Wordcloud and monthly sentiment trend images.
+
+Implementation notes:
+- Uses a non-interactive Matplotlib backend (Agg) to render PNGs.
+- Serializes access to Transformers/Sentence-Transformers with locks to avoid
+  thread-safety issues under Flask's threaded server.
+- Limits BLAS/tokenizer threads to improve stability on macOS.
+"""
+
+# Removed classic pickle-based model; keep imports minimal
 import matplotlib.dates as mdates
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
@@ -6,6 +22,12 @@ import pandas as pd
 import re
 import numpy as np
 import os
+# Limit thread usage and disable parallel tokenizers to avoid segfaults
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 try:
     import mlflow
     _MLFLOW_OK = True
@@ -15,6 +37,7 @@ except Exception:
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import io
+import threading
 from flask_cors import CORS
 from flask import Flask, request, jsonify, send_file
 import matplotlib
@@ -70,7 +93,11 @@ if _MLFLOW_OK:
 
 
 def preprocess_comment(comment):
-    """Apply preprocessing transformations to a comment."""
+    """Apply light text normalization suitable for classic ML vectorizers.
+
+    Steps: lowercase, strip, remove newlines/non-alnum (keep basic punctuation),
+    drop stopwords (keep negations), and lemmatize tokens.
+    """
     try:
         # Convert to lowercase
         comment = comment.lower()
@@ -102,25 +129,7 @@ def preprocess_comment(comment):
 
 
 
-def load_model(model_path, vectorizer_path):
-    """Load the trained model."""
-    try:
-        with open(model_path, 'rb') as file:
-            model = pickle.load(file)
-
-        with open(vectorizer_path, 'rb') as file:
-            vectorizer = pickle.load(file)
-
-        return model, vectorizer
-    except Exception as e:
-        raise
-
-
-# Initialize the model and vectorizer (robust to working dir)
-BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-model_path = os.path.join(BASE, "lgbm_model.pkl")
-vec_path = os.path.join(BASE, "tfidf_vectorizer.pkl")
-model, vectorizer = load_model(model_path, vec_path)
+# Classic ML model removed: extension uses GoEmotions; see /goemotions_with_timestamps.
 
 
 @app.route('/')
@@ -154,9 +163,16 @@ def version():
 # ===== New endpoints for charts: quality labels, hybrid relevance, emotions =====
 _sbert_model = None
 _emo_pipe = None
+# Locks to serialize model access across threads
+_sbert_lock = threading.Lock()
+_emo_lock = threading.Lock()
 
 
 def _get_sbert():
+    """Lazily load a MiniLM sentence-encoder on CPU.
+
+    Returns None on failure so callers can fall back gracefully.
+    """
     global _sbert_model
     if _sbert_model is not None:
         return _sbert_model
@@ -170,6 +186,7 @@ def _get_sbert():
 
 
 def _get_goemo():
+    """Lazily construct a GoEmotions text-classification pipeline (CPU)."""
     global _emo_pipe
     if _emo_pipe is not None:
         return _emo_pipe
@@ -188,6 +205,7 @@ def _get_goemo():
 
 
 def _ensure_spacy():
+    """Try to load a spaCy English model; return None if unavailable."""
     try:
         import spacy
         try:
@@ -202,6 +220,10 @@ def _ensure_spacy():
 
 
 def _extract_keywords(text: str) -> list:
+    """Extract simple noun-phrase keywords or fallback token/bigrams.
+
+    Prefers spaCy noun_chunks; otherwise uses a basic regex and stopword filter.
+    """
     s = (text or "").strip()
     if not s:
         return []
@@ -233,9 +255,55 @@ def _extract_keywords(text: str) -> list:
     return out[:20]
 
 
-def _pie(labels, sizes, colors=None):
+def _pie(labels, sizes, colors=None, title=None):
+    """Render a pie chart to BytesIO with white text for dark UI backgrounds.
+
+    Includes a legend (white) so labels remain readable on transparent PNGs.
+    """
     plt.figure(figsize=(6, 6))
-    plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140, colors=colors)
+    wedges, texts, autotexts = plt.pie(
+        sizes,
+        labels=labels,
+        autopct='%1.1f%%',
+        startangle=140,
+        colors=colors,
+        textprops={'color': 'white'}
+    )
+    # Ensure white text for both labels and percentages
+    for t in texts or []:
+        try:
+            t.set_color('white')
+            t.set_fontweight('bold')
+        except Exception:
+            pass
+    for t in autotexts or []:
+        try:
+            t.set_color('white')
+            t.set_fontweight('bold')
+        except Exception:
+            pass
+    if title:
+        try:
+            plt.title(title, color='white')
+        except Exception:
+            plt.title(title)
+    # Add legend to ensure labels are always visible on dark background
+    try:
+        leg = plt.legend(
+            wedges,
+            labels,
+            title="Labels",
+            loc="center left",
+            bbox_to_anchor=(1, 0.5),
+            frameon=False,
+            labelcolor='white'
+        )
+        try:
+            leg.get_title().set_color('white')
+        except Exception:
+            pass
+    except Exception:
+        pass
     plt.axis('equal')
     img_io = io.BytesIO()
     plt.savefig(img_io, format='PNG', transparent=True)
@@ -246,6 +314,7 @@ def _pie(labels, sizes, colors=None):
 
 @app.route('/quality_labels_chart', methods=['POST'])
 def quality_labels_chart():
+    """Return pie image of quality label distribution via MiniLM similarity."""
     data = request.get_json(silent=True) or {}
     raw_comments = data.get('comments') or []
     comments = [c.get('text') if isinstance(c, dict) else c for c in raw_comments]
@@ -257,8 +326,9 @@ def quality_labels_chart():
             labels_out, sizes = (["no data"], [1]) if not comments else (["model unavailable"], [1])
             img = _pie(labels_out, sizes)
             return send_file(img, mimetype='image/png')
-        lab_vecs = model.encode(labels, convert_to_numpy=True, normalize_embeddings=True)
-        txt_vecs = model.encode(comments, convert_to_numpy=True, normalize_embeddings=True)
+        with _sbert_lock:
+            lab_vecs = model.encode(labels, convert_to_numpy=True, normalize_embeddings=True)
+            txt_vecs = model.encode(comments, convert_to_numpy=True, normalize_embeddings=True)
         sims = txt_vecs @ lab_vecs.T
         idx = np.argmax(sims, axis=1)
         preds = [labels[i] for i in idx]
@@ -272,6 +342,7 @@ def quality_labels_chart():
 
 @app.route('/emotion_labels_chart', methods=['POST'])
 def emotion_labels_chart():
+    """Return pie image of top GoEmotions labels across provided comments."""
     data = request.get_json(silent=True) or {}
     raw_comments = data.get('comments') or []
     comments = [c.get('text') if isinstance(c, dict) else c for c in raw_comments]
@@ -282,7 +353,8 @@ def emotion_labels_chart():
             labels, sizes = (["no data"], [1]) if not comments else (["model unavailable"], [1])
             img = _pie(labels, sizes)
             return send_file(img, mimetype='image/png')
-        preds = emo(comments)
+        with _emo_lock:
+            preds = emo(comments)
         top = []
         for sc in preds:
             if not sc:
@@ -301,6 +373,7 @@ def emotion_labels_chart():
 
 @app.route('/hybrid_relevance_chart', methods=['POST'])
 def hybrid_relevance_chart():
+    """Return pie image of relevant/not relevant via keywords then embeddings."""
     data = request.get_json(silent=True) or {}
     raw_comments = data.get('comments') or []
     comments = [c.get('text') if isinstance(c, dict) else c for c in raw_comments]
@@ -322,7 +395,8 @@ def hybrid_relevance_chart():
         if flags and not any(flags):
             model = _get_sbert()
             if model is not None and post_text:
-                vecs = model.encode([post_text] + comments, convert_to_numpy=True, normalize_embeddings=True)
+                with _sbert_lock:
+                    vecs = model.encode([post_text] + comments, convert_to_numpy=True, normalize_embeddings=True)
                 vp, vc = vecs[0], vecs[1:]
                 sims = (vc @ vp).astype(float)
                 flags = list((sims >= 0.5).astype(bool))
@@ -335,149 +409,15 @@ def hybrid_relevance_chart():
         return jsonify({"error": f"hybrid_relevance failed: {e}"}), 500
 
 
-@app.route('/predict_with_timestamps', methods=['POST'])
-def predict_with_timestamps():
-    data = request.json
-    comments_data = data.get('comments')
-
-    if not comments_data:
-        return jsonify({"error": "No comments provided"}), 400
-
-    try:
-        comments = [item['text'] for item in comments_data]
-        timestamps = [item['timestamp'] for item in comments_data]
-
-        # Preprocess each comment before vectorizing
-        preprocessed_comments = [preprocess_comment(
-            comment) for comment in comments]
-
-        # Transform comments using the vectorizer
-        transformed_comments = vectorizer.transform(preprocessed_comments)
-
-        # Convert the sparse matrix to dense format
-        dense_comments = transformed_comments.toarray()  # Convert to dense array
-
-        # Make predictions
-        predictions = model.predict(dense_comments).tolist()  # Convert to list
-
-        # Convert predictions to strings for consistency
-        predictions = [str(pred) for pred in predictions]
-    except Exception as e:
-        return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
-
-    # Return the response with original comments, predicted sentiments, and timestamps
-    response = [{"comment": comment, "sentiment": sentiment, "timestamp": timestamp}
-                for comment, sentiment, timestamp in zip(comments, predictions, timestamps)]
-
-    # Log to MLflow (best-effort)
-    if _MLFLOW_OK:
-        try:
-            counts = {"pos": sum(1 for s in predictions if s == "1"),
-                      "neu": sum(1 for s in predictions if s == "0"),
-                      "neg": sum(1 for s in predictions if s == "-1")}
-            with mlflow.start_run(run_name="predict_with_timestamps", nested=True):
-                mlflow.log_param("n_comments", len(comments))
-                for k, v in counts.items():
-                    mlflow.log_metric(f"count_{k}", v)
-        except Exception:
-            pass
-    return jsonify(response)
+# Removed classic sentiment prediction endpoints; superseded by GoEmotions endpoints.
 
 
-@app.route('/predict', methods=['POST'])
-def predict():
-    data = request.json
-    comments = data.get('comments')
-
-    if not comments:
-        return jsonify({"error": "No comments provided"}), 400
-
-    try:
-        # Preprocess each comment before vectorizing
-        preprocessed_comments = [preprocess_comment(
-            comment) for comment in comments]
-
-        # Transform comments using the vectorizer
-        transformed_comments = vectorizer.transform(preprocessed_comments)
-
-        # Convert the sparse matrix to dense format
-        dense_comments = transformed_comments.toarray()  # Convert to dense array
-
-        # Make predictions
-        predictions = model.predict(dense_comments).tolist()  # Convert to list
-
-        # predictions are ints: -1,0,1
-    except Exception as e:
-        return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
-
-    # Return the response with original comments and predicted sentiments
-    response = [{"comment": comment, "sentiment": sentiment}
-                for comment, sentiment in zip(comments, predictions)]
-
-    # Log to MLflow (best-effort)
-    if _MLFLOW_OK:
-        try:
-            counts = {"pos": sum(1 for s in predictions if s == 1),
-                      "neu": sum(1 for s in predictions if s == 0),
-                      "neg": sum(1 for s in predictions if s == -1)}
-            with mlflow.start_run(run_name="predict", nested=True):
-                mlflow.log_param("n_comments", len(comments))
-                for k, v in counts.items():
-                    mlflow.log_metric(f"count_{k}", v)
-        except Exception:
-            pass
-    return jsonify(response)
-
-
-@app.route('/generate_chart', methods=['POST'])
-def generate_chart():
-    try:
-        data = request.get_json()
-        sentiment_counts = data.get('sentiment_counts')
-
-        if not sentiment_counts:
-            return jsonify({"error": "No sentiment counts provided"}), 400
-
-        # Prepare data for the pie chart
-        labels = ['Positive', 'Neutral', 'Negative']
-        sizes = [
-            int(sentiment_counts.get('1', 0)),
-            int(sentiment_counts.get('0', 0)),
-            int(sentiment_counts.get('-1', 0))
-        ]
-        if sum(sizes) == 0:
-            raise ValueError("Sentiment counts sum to zero")
-
-        colors = ['#36A2EB', '#C9CBCF', '#FF6384']  # Blue, Gray, Red
-
-        # Generate the pie chart
-        plt.figure(figsize=(6, 6))
-        plt.pie(
-            sizes,
-            labels=labels,
-            colors=colors,
-            autopct='%1.1f%%',
-            startangle=140,
-            textprops={'color': 'w'}
-        )
-        # Equal aspect ratio ensures that pie is drawn as a circle.
-        plt.axis('equal')
-
-        # Save the chart to a BytesIO object
-        img_io = io.BytesIO()
-        plt.savefig(img_io, format='PNG', transparent=True)
-        img_io.seek(0)
-        plt.close()
-
-        # Return the image as a response
-        return send_file(img_io, mimetype='image/png')
-    except Exception as e:
-        app.logger.error(f"Error in /generate_chart: {e}")
-        return jsonify({"error": f"Chart generation failed: {str(e)}"}), 500
+# Removed legacy classic sentiment pie endpoint (/generate_chart)
 
 
 @app.route('/generate_wordcloud', methods=['POST'])
 def generate_wordcloud():
+    """Render a wordcloud PNG from provided comments."""
     try:
         data = request.get_json()
         comments = data.get('comments')
@@ -514,89 +454,84 @@ def generate_wordcloud():
         return jsonify({"error": f"Word cloud generation failed: {str(e)}"}), 500
 
 
-@app.route('/generate_trend_graph', methods=['POST'])
-def generate_trend_graph():
+# Removed classic sentiment trend endpoint (/generate_trend_graph)
+
+
+@app.route('/goemotions_with_timestamps', methods=['POST'])
+def goemotions_with_timestamps():
+    """Return top GoEmotions label (+score) per comment with timestamp (JSON)."""
     try:
-        data = request.get_json()
-        sentiment_data = data.get('sentiment_data')
+        data = request.get_json(silent=True) or {}
+        raw_comments = data.get('comments') or []
+        comments = [c.get('text') if isinstance(c, dict) else c for c in raw_comments]
+        comments = [str(x or '').strip() for x in comments]
+        timestamps = [c.get('timestamp') if isinstance(c, dict) else None for c in raw_comments]
+        emo = _get_goemo()
+        if emo is None:
+            return jsonify({"error": "GoEmotions model unavailable"}), 503
+        with _emo_lock:
+            preds = emo(comments)
+        out = []
+        for txt, ts, sc in zip(comments, timestamps, preds):
+            if sc:
+                top = max(sc, key=lambda d: d.get('score', 0.0))
+                label = str(top.get('label', '')).lower()
+                score = float(top.get('score', 0.0))
+            else:
+                label, score = '', 0.0
+            out.append({"comment": txt, "emotion": label, "score": score, "timestamp": ts})
+        return jsonify(out)
+    except Exception as e:
+        app.logger.error(f"Error in /goemotions_with_timestamps: {e}")
+        return jsonify({"error": f"GoEmotions inference failed: {str(e)}"}), 500
 
-        if not sentiment_data:
-            return jsonify({"error": "No sentiment data provided"}), 400
 
-        # Convert sentiment_data to DataFrame
-        df = pd.DataFrame(sentiment_data)
+@app.route('/generate_emotion_trend', methods=['POST'])
+def generate_emotion_trend():
+    """Render monthly percentage trend for top GoEmotions labels (PNG)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        items = data.get('items') or []
+        if not items:
+            return jsonify({"error": "No items provided"}), 400
+        df = pd.DataFrame(items)
+        if 'timestamp' not in df.columns or 'emotion' not in df.columns:
+            return jsonify({"error": "Items must include timestamp and emotion"}), 400
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-
-        # Set the timestamp as the index
+        df['emotion'] = df['emotion'].astype(str)
         df.set_index('timestamp', inplace=True)
-
-        # Ensure the 'sentiment' column is numeric
-        df['sentiment'] = df['sentiment'].astype(int)
-
-        # Map sentiment values to labels
-        sentiment_labels = {-1: 'Negative', 0: 'Neutral', 1: 'Positive'}
-
-        # Resample the data over monthly intervals and count sentiments
-        monthly_counts = df.resample(
-            'M')['sentiment'].value_counts().unstack(fill_value=0)
-
-        # Calculate total counts per month
+        monthly_counts = df.resample('ME')['emotion'].value_counts().unstack(fill_value=0)
         monthly_totals = monthly_counts.sum(axis=1)
-
-        # Calculate percentages
         monthly_percentages = (monthly_counts.T / monthly_totals).T * 100
+        # Keep top 5 emotions overall for readability
+        overall = monthly_counts.sum(axis=0).sort_values(ascending=False)
+        top_labels = list(overall.head(5).index)
+        monthly_percentages = monthly_percentages.reindex(columns=top_labels, fill_value=0)
 
-        # Ensure all sentiment columns are present
-        for sentiment_value in [-1, 0, 1]:
-            if sentiment_value not in monthly_percentages.columns:
-                monthly_percentages[sentiment_value] = 0
-
-        # Sort columns by sentiment value
-        monthly_percentages = monthly_percentages[[-1, 0, 1]]
-
-        # Plotting
         plt.figure(figsize=(12, 6))
-
-        colors = {
-            -1: 'red',     # Negative sentiment
-            0: 'gray',     # Neutral sentiment
-            1: 'green'     # Positive sentiment
-        }
-
-        for sentiment_value in [-1, 0, 1]:
+        for label in top_labels:
             plt.plot(
                 monthly_percentages.index,
-                monthly_percentages[sentiment_value],
-                marker='o',
-                linestyle='-',
-                label=sentiment_labels[sentiment_value],
-                color=colors[sentiment_value]
+                monthly_percentages[label],
+                marker='o', linestyle='-', label=label
             )
-
-        plt.title('Monthly Sentiment Percentage Over Time')
+        plt.title('Monthly GoEmotions Trend Over Time')
         plt.xlabel('Month')
         plt.ylabel('Percentage of Comments (%)')
         plt.grid(True)
         plt.xticks(rotation=45)
-
-        # Format the x-axis dates
         plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
         plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=12))
-
-        plt.legend()
+        plt.legend(title='Emotion')
         plt.tight_layout()
-
-        # Save the trend graph to a BytesIO object
         img_io = io.BytesIO()
         plt.savefig(img_io, format='PNG')
         img_io.seek(0)
         plt.close()
-
-        # Return the image as a response
         return send_file(img_io, mimetype='image/png')
     except Exception as e:
-        app.logger.error(f"Error in /generate_trend_graph: {e}")
-        return jsonify({"error": f"Trend graph generation failed: {str(e)}"}), 500
+        app.logger.error(f"Error in /generate_emotion_trend: {e}")
+        return jsonify({"error": f"Emotion trend generation failed: {str(e)}"}), 500
 
 
 if __name__ == '__main__':

@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/jaydenooi_0223/Downloads/End-to-end-Youtube-Sentiment-main/flask_app/mlruns/802863862831999997/c093e9fe170f4ddea7079b9661d915c5/artifacts
+end_time: 1757472192869
+entry_point_name: ''
+experiment_id: '802863862831999997'
+lifecycle_stage: active
+run_id: c093e9fe170f4ddea7079b9661d915c5
+run_name: predict_with_timestamps
+run_uuid: c093e9fe170f4ddea7079b9661d915c5
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1757472192857
+status: 3
+tags: []
+user_id: jaydenooi_0223
